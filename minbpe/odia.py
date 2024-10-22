@@ -1,5 +1,6 @@
 import regex as re
-from typing import Dict, List, Set, Union
+from typing import List, Tuple
+from functools import lru_cache
 
 from .base import Tokenizer, get_stats, merge
 
@@ -7,52 +8,57 @@ from .base import Tokenizer, get_stats, merge
 GPT2_SPLIT_PATTERN = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 GPT4_SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
 
+
 class Odia:
     # List of valid Unicode ranges for Odia script
     valid_ranges = {
         'anusvara': range(0x0B01, 0x0B03 + 1),
-        'matras': set(range(0x0B3C, 0x0B4D + 1)).union({0x0B55, 0x0B56, 0x0B57}),
+        'matras': frozenset(range(0x0B3C, 0x0B4D + 1)).union({0x0B55, 0x0B56, 0x0B57}),
         'digits': range(0x0B66, 0x0B6F + 1),
-        'sign': set(range(0x0B72, 0x0B77 + 1)).union(set([0x2018, 0x2019, 0x201C, 0x201D])),
-        'aux_sign': {0x0B70, 0x0964, 0x0965},
+        'sign': frozenset(range(0x0B72, 0x0B77 + 1)).union(set([0x2018, 0x2019, 0x201C, 0x201D])),
+        'aux_sign': frozenset({0x0B70, 0x0964, 0x0965}),
         'vowels': range(0x0B05, 0x0B14 + 1),
-        'consonants': set(range(0x0B15, 0x0B39 + 1)).union({0x0B5F, 0x0B71}),
+        'consonants': frozenset(range(0x0B15, 0x0B39 + 1)).union({0x0B5F, 0x0B71}),
     }
 
     # List of Unicode code points to ignore
-    ignore_case = {0x0B0D, 0x0B0E, 0x0B11, 0x0B12, 0x0B29, 0x0B31, 0x0B34, 0x0B45, 0x0B46, 0x0B5E, 0x0B49, 0x0B4A}
+    ignore_case = frozenset({0x0B0D, 0x0B0E, 0x0B11, 0x0B12, 0x0B29, 0x0B31, 0x0B34, 0x0B45, 0x0B46, 0x0B5E, 0x0B49, 0x0B4A})
 
     def __init__(self):
         self.odia_chars = {
-            key: [chr(i) for i in (val if isinstance(val, range) else val) if i not in self.ignore_case]
+            key: tuple(chr(i) for i in (val if isinstance(val, range) else val) if i not in self.ignore_case)
             for key, val in self.valid_ranges.items()
         }
 
-        self.odia_chars['complex_char'] = []
-        for i in self.odia_chars['matras'] + self.odia_chars['anusvara']:
-            for j in self.odia_chars['vowels'] + self.odia_chars['consonants']:
-                self.odia_chars['complex_char'].append(''.join([j, i]))
-
-
+        self.odia_chars['complex_char'] = tuple(
+            ''.join([j, i])
+            for i in self.odia_chars['matras'] + self.odia_chars['anusvara']
+            for j in self.odia_chars['vowels'] + self.odia_chars['consonants']
+        )
+        
+    @lru_cache(maxsize=1)
     def generate_odia_pattern(self):
         """
         Generate a regex pattern that matches any valid Odia character.
+        patrn  = [
+            (r'\s*' + r'|\s*'.join(map(re.escape, chars))) if key == 'complex_char'
+            else f"[{''.join(map(re.escape, chars))}]"
+            for key, chars in reversed(self.odia_chars.items())
+        ]
+        return  r'|\s*'.join(patrn)
         """
-        pattern_parts = []
-        for key, chars in list(self.odia_chars.items())[::-1]: 
-            # we are traversing in the revese order for finding the complex char first, consonants, vowels etc 
-            # Each character set will be part of the pattern, using `|` for alternation
-            if key == 'complex_char':
-                # Complex chars are added as whole sequences, so no need for []
-                pattern_parts.append('|'.join(re.escape(char) for char in chars))
-            else:
-                # Individual chars are added inside []
-                pattern_parts.append('[' + ''.join(re.escape(char) for char in chars) + ']')
+        all_chars = self.get_all_chars()
+        return r'\s*' + r'|\s*'.join(map(re.escape, all_chars))
+        
 
+    @lru_cache(maxsize=1)
+    def get_all_chars(self) -> Tuple[str]:
+        """
+        Get a set of all valid Odia characters.
+        """
+        return tuple(j for i in list(reversed(self.odia_chars.keys())) for j in self.get_chars(i))
 
-        # Join all the parts with alternation and return the pattern
-        return '|'.join(pattern_parts)
-
+    
     def get_chars(self, category: str) -> List[str]:
         if category not in self.odia_chars:
             raise ValueError(f"Invalid category: {category}")
@@ -62,6 +68,30 @@ class Odia:
         if name in self.odia_chars:
             return self.get_chars(name)
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
+    
+    def match_odia(self, text):
+        """
+        Match Odia text using the generated pattern.
+        """
+        pattern = re.compile(self.generate_odia_pattern())
+        return pattern.findall(text)
+
+def _build_vocab(self):
+    """
+    monkey patch  _build_vocab of the Tokenizer to add in odia unicodes along with the english 0-256
+    """
+    vocab = {idx: bytes([idx]) for idx in range(256)}
+    for (p0, p1), idx in self.merges.items():
+            vocab[idx] = vocab[p0] + vocab[p1]
+    for special, idx in self.special_tokens.items():
+            vocab[idx] = special.encode("utf-8")
+
+    odia = Odia()
+    
+
+    return vocab
+    
+#Tokenizer._build_vocab
 
 class OdiaRegexTokenizer(Tokenizer):
 
@@ -82,8 +112,12 @@ class OdiaRegexTokenizer(Tokenizer):
         self.inverse_special_tokens = {}
 
     def train(self, text, vocab_size, verbose=False):
-        assert vocab_size >= 256
-        num_merges = vocab_size - 256
+        od_chars = self.odia.get_all_chars()
+        od_chars_len = len(od_chars)
+
+        assert vocab_size >= 256 + od_chars_len
+
+        num_merges = vocab_size - (256 + od_chars_len)
 
         # split the text up into text chunks
         text_chunks = re.findall(self.compiled_pattern, text)
@@ -94,7 +128,11 @@ class OdiaRegexTokenizer(Tokenizer):
 
         # iteratively merge the most common pairs to create new tokens
         merges = {}  # (int, int) -> int
-        vocab = {idx: bytes([idx]) for idx in range(256)}  # idx -> bytes
+        vocab = {idx: bytes([idx]) for idx in range(256)} # idx -> bytes
+
+        for idx, char in enumerate(od_chars, start=256):
+            vocab[idx] = char.encode('utf-8')
+
         for i in range(num_merges):
             # count the number of times every consecutive pair appears
             stats = {}
@@ -104,7 +142,7 @@ class OdiaRegexTokenizer(Tokenizer):
             # find the pair with the highest count
             pair = max(stats, key=stats.get)
             # mint a new token: assign it the next available id
-            idx = 256 + i
+            idx = len(vocab) + i
             # replace all occurrences of pair in ids with idx
             ids = [merge(chunk_ids, pair, idx) for chunk_ids in ids]
             # save the merge
@@ -148,6 +186,7 @@ class OdiaRegexTokenizer(Tokenizer):
 
     def encode_ordinary(self, text):
         text_chunks = re.findall(self.compiled_pattern, text)
+        #print(text_chunks)
         ids = []
         for chunk in text_chunks:
             chunk_bytes = chunk.encode("utf-8")
